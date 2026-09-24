@@ -1,0 +1,130 @@
+#include <chrono>
+#include "engine/engine.h"
+
+static Game* g_game = nullptr;
+static Input* g_input = nullptr;
+static bool g_captureMouse = true;
+
+LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+    case WM_KEYDOWN:
+        if (wParam == VK_ESCAPE)
+            PostQuitMessage(0);
+        return 0;
+    case WM_MOUSEMOVE:
+        if (g_input && g_captureMouse) {
+            static int lastX = -1, lastY = -1;
+            int x = LOWORD(lParam);
+            int y = HIWORD(lParam);
+            if (lastX >= 0) {
+                g_input->onMouseMove(x - lastX, y - lastY);
+            }
+            lastX = x;
+            lastY = y;
+
+            RECT rect;
+            GetClientRect(hwnd, &rect);
+            POINT center = { rect.right / 2, rect.bottom / 2 };
+            ClientToScreen(hwnd, &center);
+            SetCursorPos(center.x, center.y);
+            lastX = rect.right / 2;
+            lastY = rect.bottom / 2;
+        }
+        return 0;
+    case WM_LBUTTONDOWN:
+        if (g_game) g_captureMouse = true;
+        return 0;
+    }
+    return DefWindowProc(hwnd, msg, wParam, lParam);
+}
+
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
+    WNDCLASSW wc = {};
+    wc.lpfnWndProc = WindowProc;
+    wc.hInstance = hInstance;
+    wc.lpszClassName = L"MinimalEngine3D";
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    RegisterClassW(&wc);
+
+    HWND hwnd = CreateWindowExW(
+        0, L"MinimalEngine3D",
+        L"3D Engine - WASD движение | Мышь поворот | Space прыжок | Tab курсор | Esc выход",
+        WS_OVERLAPPEDWINDOW,
+        CW_USEDEFAULT, CW_USEDEFAULT, 1024, 768,
+        nullptr, nullptr, hInstance, nullptr
+    );
+    if (!hwnd) return 1;
+
+    ShowWindow(hwnd, nCmdShow);
+    UpdateWindow(hwnd);
+
+    Game game;
+    Input input;
+    Framebuffer fb;
+    g_game = &game;
+    g_input = &input;
+    g_captureMouse = true;
+
+    game.init();
+
+    game.registerMechanic([](Game& g, Input& in, float) {
+        g.camera.moveSpeed = in.keys[VK_SHIFT] ? 10.0f : 5.0f;
+        });
+
+    HDC hdc = GetDC(hwnd);
+    auto lastTime = std::chrono::high_resolution_clock::now();
+
+    MSG msg = {};
+    bool running = true;
+
+    while (running) {
+        while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) { running = false; break; }
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
+        if (!running) break;
+
+        auto now = std::chrono::high_resolution_clock::now();
+        float dt = std::chrono::duration<float>(now - lastTime).count();
+        lastTime = now;
+        if (dt > 0.05f) dt = 0.05f;
+
+        input.beginFrame();
+        g_captureMouse = game.captureMouse;
+        input.setCapture(hwnd, game.captureMouse);
+
+        game.update(dt, input);
+        if (!game.running) break;
+
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        int w = rc.right - rc.left;
+        int h = rc.bottom - rc.top;
+        if (w > 0 && h > 0) {
+            fb.resize(hdc, w, h);
+            fb.clear(0xFF000000);
+
+            Matrix4 proj = Matrix4::perspective(game.camera.fov, (float)w / h, 0.1f, 100.0f);
+            Matrix4 view = game.camera.viewMatrix();
+            Matrix4 mvp = proj * view;
+
+            for (const Mesh& mesh : game.world.meshes)
+                fb.drawMesh(mesh, mvp);
+
+            // Передаём world и camera чтобы отрисовать миникарту в верхнем правом углу
+            fb.present(hdc, &game.world, &game.camera);
+        }
+    }
+
+    input.setCapture(hwnd, false);
+    game.shutdown();
+    fb.destroy();
+    ReleaseDC(hwnd, hdc);
+    g_game = nullptr;
+    g_input = nullptr;
+    return 0;
+}
